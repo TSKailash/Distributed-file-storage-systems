@@ -1,19 +1,21 @@
 package com.kailash.storageservice.dto;
 
+import java.util.UUID;
+
 public class FileUploadResponse {
     private String message;
-    private String filename;
+    private UUID fieldId;
 
-    public FileUploadResponse(String message, String filename){
+    public FileUploadResponse(String message, UUID fieldId){
         this.message=message;
-        this.filename=filename;
+        this.fieldId=fieldId;
     }
 
     public String getMessage(){
         return message;
     }
 
-    public String getFilename(){
-        return filename;
+    public UUID getFieldId(){
+        return fieldId;
     }
 }

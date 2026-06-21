@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.UUID;
 
 @RestController
 @RequestMapping("/api/files")
@@ -27,14 +28,14 @@ public class FileController {
     @PostMapping("/upload")
     @ResponseStatus(HttpStatus.CREATED)
     public FileUploadResponse upload(@RequestParam("file") MultipartFile file) throws IOException {
-        String filename=fileService.uploadFile(file);
+        UUID id=fileService.uploadFile(file);
 
-        return new FileUploadResponse("Uploaded", filename);
+        return new FileUploadResponse("Uploaded", id);
     }
 
-    @GetMapping("/{filename}")
-    public ResponseEntity<Resource> downloadFile(@PathVariable String filename){
-        Resource file=fileService.downloadFile(filename);
+    @GetMapping("/{id}")
+    public ResponseEntity<Resource> downloadFile(@PathVariable UUID id){
+        Resource file=fileService.downloadFile(id);
         return ResponseEntity
                 .ok()
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
@@ -45,9 +46,9 @@ public class FileController {
                 .body(file);
     }
 
-    @DeleteMapping("/{filename}")
-    public ResponseEntity<String> deleteFile(@PathVariable String filename){
-        fileService.deleteFile(filename);
+    @DeleteMapping("/{id}")
+    public ResponseEntity<String> deleteFile(@PathVariable UUID id){
+        fileService.deleteFile(id);
         return ResponseEntity.ok("Deleted successfully");
     }
 }
