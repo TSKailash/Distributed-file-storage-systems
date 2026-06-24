@@ -5,41 +5,97 @@ import com.kailash.storageservice.exception.FileValidationException;
 import com.kailash.storageservice.exception.StorageException;
 import com.kailash.storageservice.model.FileMetaData;
 import com.kailash.storageservice.repository.FileMetadataRepository;
-import org.slf4j.ILoggerFactory;
+import io.minio.GetObjectArgs;
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
+import io.minio.RemoveObjectArgs;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.InputStreamResource;
+import com.kailash.storageservice.dto.FileDownload;
 import org.springframework.core.io.Resource;
-import org.springframework.core.io.UrlResource;
+import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
-import java.net.MalformedURLException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
+import java.time.Duration;
 import java.util.List;
-import java.util.Optional;
 import java.util.UUID;
 
 @Service
 public class FileService {
 
-    private final Logger logger=LoggerFactory.getLogger(FileService.class);
+    private static final Logger logger =
+            LoggerFactory.getLogger(FileService.class);
 
-    private final Path storagePath = Paths.get("storage");
+    @Value("${minio.bucket-name}")
+    private String bucketName;
 
     private final FileMetadataRepository fileMetadataRepository;
 
-    public FileService(FileMetadataRepository fileMetadataRepository) {
-        this.fileMetadataRepository = fileMetadataRepository;
+    private final RedisTemplate<String, FileMetaData> redisTemplate;
 
-        try {
-            Files.createDirectories(storagePath);
-        } catch (IOException e) {
-            throw new StorageException("Could not initialize storage", e);
-        }
+    private final MinioClient minioClient;
+
+    public FileService(
+            FileMetadataRepository fileMetadataRepository,
+            RedisTemplate<String, FileMetaData> redisTemplate,
+            MinioClient minioClient
+    ) {
+        this.fileMetadataRepository = fileMetadataRepository;
+        this.redisTemplate = redisTemplate;
+        this.minioClient = minioClient;
     }
+
+    private String getCacheKey(UUID id) {
+        return "file:" + id;
+    }
+
+    private FileMetaData getFromCache(UUID id) {
+
+        String key = getCacheKey(id);
+
+        FileMetaData data =
+                redisTemplate.opsForValue().get(key);
+
+        if (data != null) {
+            logger.info(
+                    "Redis cache HIT for fileId={}",
+                    id
+            );
+            return data;
+        }
+
+        logger.info(
+                "Redis cache MISS for fileId={}",
+                id
+        );
+
+        return null;
+    }
+
+    private void saveToCache(FileMetaData data) {
+
+        String key = getCacheKey(data.getId());
+
+        redisTemplate
+                .opsForValue()
+                .set(
+                        key,
+                        data,
+                        Duration.ofMinutes(10)
+                );
+
+        logger.info(
+                "Saved fileId={} to Redis cache",
+                data.getId()
+        );
+    }
+
     private void rollbackFile(Path filePath) {
 
         try {
@@ -57,10 +113,80 @@ public class FileService {
     }
 
 
-    public UUID uploadFile(MultipartFile file) {
-        validateFile(file);
+
+    private void deleteFromCache(UUID id) {
+
+        String key = getCacheKey(id);
+
+        redisTemplate.delete(key);
+
         logger.info(
-                "Upload started. originalName={}, size={} bytes, type={}",
+                "Cache invalidated for fileId={}",
+                id
+        );
+    }
+
+    private void uploadObject(
+            MultipartFile file,
+            String objectName
+    ) {
+
+        try {
+
+            minioClient.putObject(
+                    PutObjectArgs.builder()
+                            .bucket(bucketName)
+                            .object(objectName)
+                            .stream(
+                                    file.getInputStream(),
+                                    file.getSize(),
+                                    -1
+                            )
+                            .contentType(file.getContentType())
+                            .build()
+            );
+
+        } catch (Exception e) {
+
+            throw new StorageException(
+                    "Failed to upload file to MinIO",
+                    e
+            );
+        }
+    }
+
+    private void deleteObject(String objectName) {
+
+        try {
+
+            minioClient.removeObject(
+                    RemoveObjectArgs.builder()
+                            .bucket(bucketName)
+                            .object(objectName)
+                            .build()
+            );
+
+            logger.info(
+                    "Deleted object from MinIO: {}",
+                    objectName
+            );
+
+        } catch (Exception e) {
+
+            logger.error(
+                    "Failed to delete object {} from MinIO",
+                    objectName,
+                    e
+            );
+        }
+    }
+
+    public UUID uploadFile(MultipartFile file) {
+
+        validateFile(file);
+
+        logger.info(
+                "Upload started. originalName={}, size={}, type={}",
                 file.getOriginalFilename(),
                 file.getSize(),
                 file.getContentType()
@@ -68,114 +194,157 @@ public class FileService {
 
         String originalFileName = file.getOriginalFilename();
 
-        String uniqueFileName=generateFileName(originalFileName);
+        String storedFileName = generateFileName(originalFileName);
 
-        Path filePath=null;
         try {
-            filePath=storeFile(file, uniqueFileName);
-            FileMetaData metaData=saveMetaData(file, originalFileName, uniqueFileName);
-            logger.info(
-                    "Upload successful. fileId={}, storedName={}",
-                    metaData.getId(),
-                    metaData.getStoredName()
+
+            // Upload actual file to MinIO
+            uploadObject(file, storedFileName);
+
+            // Save metadata to PostgreSQL
+            FileMetaData metadata = saveMetaData(
+                    file,
+                    originalFileName,
+                    storedFileName
             );
-            return metaData.getId();
-        } catch (Exception ex) {
-            if(filePath !=null){
-                logger.error(
-                        "Upload failed. Rolling back file {}",
-                        uniqueFileName, ex
-                );
-                rollbackFile(filePath);
-            }
+
+            logger.info(
+                    "Upload successful. fileId={}, objectName={}",
+                    metadata.getId(),
+                    storedFileName
+            );
+
+            return metadata.getId();
+
+        } catch (Exception e) {
+
+            logger.error(
+                    "Upload failed. Rolling back MinIO object={}",
+                    storedFileName,
+                    e
+            );
+
+            // Remove orphan file from MinIO
+            deleteObject(storedFileName);
+
             throw new StorageException(
-                    "Upload failed. Rolled back stored file",
-                    ex
+                    "Failed to upload file",
+                    e
             );
         }
     }
 
 
-    public Resource downloadFile(UUID id) {
+    public FileDownload downloadFile(UUID id) {
+
+        logger.info(
+                "Download requested. fileId={}",
+                id
+        );
+
+        FileMetaData metadata = getFromCache(id);
+
+        if (metadata == null) {
+
+            metadata = fileMetadataRepository
+                    .findById(id)
+                    .orElseThrow(() ->
+                            new FileNotFound(
+                                    "File not found with id " + id
+                            )
+                    );
+
+            saveToCache(metadata);
+        }
+
         try {
+
+            InputStreamResource resource =
+                    new InputStreamResource(
+                            minioClient.getObject(
+                                    GetObjectArgs.builder()
+                                            .bucket(bucketName)
+                                            .object(metadata.getStoredName())
+                                            .build()
+                            )
+                    );
+
             logger.info(
-                    "Download requested. fileId={}",
-                    id
-            );
-            Optional<FileMetaData> data=fileMetadataRepository.findById(id);
-            if(data.isEmpty()){
-                throw new FileNotFound("File not found with id: "+id);
-            }
-
-            String filename=data.get().getStoredName();
-
-            Path filePath = storagePath.resolve(filename).normalize();
-
-            Resource resource = new UrlResource(filePath.toUri());
-
-            if (!resource.exists() || !resource.isReadable()) {
-                throw new FileNotFound("File not found: " + filename);
-            }
-            logger.info(
-                    "Download successful. fileId={}, storedName={}",
+                    "Download successful. fileId={}, objectName={}",
                     id,
-                    data.get().getStoredName()
+                    metadata.getStoredName()
             );
 
-            return resource;
+            return new FileDownload(
+                    resource,
+                    metadata.getOriginalName(),
+                    metadata.getContentType()
+            );
 
-        } catch (MalformedURLException e) {
-            throw new StorageException("Unable to access file", e);
+        } catch (Exception e) {
+
+            throw new StorageException(
+                    "Failed to download file from MinIO",
+                    e
+            );
         }
     }
 
     public void deleteFile(UUID id) {
+
         logger.info(
                 "Delete requested. fileId={}",
                 id
         );
+
         FileMetaData metadata = fileMetadataRepository
                 .findById(id)
                 .orElseThrow(() ->
-                        new FileNotFound("File not found with id: " + id)
+                        new FileNotFound(
+                                "File not found with id " + id
+                        )
                 );
-        Path filePath = storagePath
-                .resolve(metadata.getStoredName())
-                .normalize();
+
         try {
-            Files.delete(filePath);
-            try {
-                // Delete metadata after successful file deletion
-                fileMetadataRepository.deleteById(id);
-            } catch (Exception ex) {
-                throw new StorageException(
-                        "File deleted but metadata cleanup failed. System is inconsistent.",
-                        ex
-                );
-            }
-        } catch (IOException ex) {
+
+            // Remove actual file
+            deleteObject(metadata.getStoredName());
+
+            // Remove metadata
+            fileMetadataRepository.deleteById(id);
+
+            // Remove cache
+            deleteFromCache(id);
+
+            logger.info(
+                    "Delete successful. fileId={}, object={}",
+                    id,
+                    metadata.getStoredName()
+            );
+
+        } catch (Exception e) {
 
             throw new StorageException(
-                    "Failed to delete file from storage",
-                    ex
+                    "Failed to delete file",
+                    e
             );
         }
-        logger.info(
-                "Delete successful. fileId={}, storedName={}",
-                id,
-                metadata.getStoredName()
-        );
     }
 
-    public void validateFile(MultipartFile file){
+    private void validateFile(MultipartFile file) {
+
         final long MAX_FILE_SIZE = 100 * 1024 * 1024;
 
         if (file.isEmpty()) {
-            throw new FileValidationException("File cannot be empty");
+            throw new FileValidationException(
+                    "File cannot be empty"
+            );
         }
 
         if (file.getSize() > MAX_FILE_SIZE) {
-            throw new FileValidationException("File size limit exceeded!! (Must be 100MB or below)");
+            throw new FileValidationException(
+                    "File size limit exceeded (Max 100 MB)"
+            );
         }
 
         List<String> allowedTypes = List.of(
@@ -184,51 +353,65 @@ public class FileService {
                 "image/png",
                 "video/mp4"
         );
+
         if (!allowedTypes.contains(file.getContentType())) {
-            throw new FileValidationException("Unsupported file type");
+            throw new FileValidationException(
+                    "Unsupported file type"
+            );
         }
     }
 
-    public String generateFileName(String originalFileName){
+    private String generateFileName(String originalFileName) {
+
         String extension = "";
-        if (originalFileName != null && originalFileName.contains(".")) {
-            extension = originalFileName.substring(originalFileName.lastIndexOf("."));
+
+        if (originalFileName != null &&
+                originalFileName.contains(".")) {
+
+            extension = originalFileName.substring(
+                    originalFileName.lastIndexOf(".")
+            );
         }
+
         return UUID.randomUUID() + extension;
     }
 
-    private Path storeFile(MultipartFile file, String fileName) {
-
-        Path filePath = storagePath
-                .resolve(fileName)
-                .normalize();
-
+    private void storeFile(MultipartFile file, String fileName) {
         try {
-
-            Files.copy(
-                    file.getInputStream(),
-                    filePath
+            minioClient.putObject(
+                    PutObjectArgs.builder()
+                            .bucket(bucketName)
+                            .object(fileName)
+                            .stream(
+                                    file.getInputStream(),
+                                    file.getSize(),
+                                    -1
+                            )
+                            .contentType(file.getContentType())
+                            .build()
             );
-
-            return filePath;
-
-        } catch (IOException e) {
+        } catch (Exception e) {
 
             throw new StorageException(
-                    "Failed to store file",
+                    "Failed to Upload to MinIO",
                     e
             );
         }
     }
 
-    public FileMetaData saveMetaData(MultipartFile file, String originalFileName, String storedFileName){
-        FileMetaData metaData=new FileMetaData(
+    private FileMetaData saveMetaData(
+            MultipartFile file,
+            String originalFileName,
+            String storedFileName
+    ) {
+
+        FileMetaData metadata = new FileMetaData(
                 originalFileName,
                 storedFileName,
                 file.getSize(),
                 file.getContentType()
         );
 
-        return fileMetadataRepository.save(metaData);
+        return fileMetadataRepository.save(metadata);
     }
 }

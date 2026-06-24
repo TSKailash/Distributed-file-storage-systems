@@ -1,5 +1,6 @@
 package com.kailash.storageservice.controller;
 
+import com.kailash.storageservice.dto.FileDownload;
 import com.kailash.storageservice.dto.FileUploadResponse;
 import com.kailash.storageservice.service.FileService;
 import org.springframework.core.io.Resource;
@@ -34,16 +35,18 @@ public class FileController {
     }
 
     @GetMapping("/{id}")
-    public ResponseEntity<Resource> downloadFile(@PathVariable UUID id){
-        Resource file=fileService.downloadFile(id);
+    public ResponseEntity<Resource> downloadFile(@PathVariable UUID id) {
+
+        FileDownload file = fileService.downloadFile(id);
+
         return ResponseEntity
                 .ok()
-                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .contentType(MediaType.parseMediaType(file.getContentType()))
                 .header(
                         HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\""+file.getFilename()+"\""
+                        "attachment; filename=\"" + file.getOriginalName() + "\""
                 )
-                .body(file);
+                .body(file.getResource());
     }
 
     @DeleteMapping("/{id}")
