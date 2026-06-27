@@ -1,10 +1,14 @@
 package com.kailash.storageservice.service;
 
+import com.kailash.storageservice.dto.CachedFileMetaData;
 import com.kailash.storageservice.exception.FileNotFound;
 import com.kailash.storageservice.exception.FileValidationException;
+import com.kailash.storageservice.exception.InvalidCredentialsException;
 import com.kailash.storageservice.exception.StorageException;
-import com.kailash.storageservice.model.FileMetaData;
+import com.kailash.storageservice.model.FileMetadata;
+import com.kailash.storageservice.model.User;
 import com.kailash.storageservice.repository.FileMetadataRepository;
+import com.kailash.storageservice.repository.UserRepository;
 import io.minio.GetObjectArgs;
 import io.minio.MinioClient;
 import io.minio.PutObjectArgs;
@@ -14,8 +18,12 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
 import com.kailash.storageservice.dto.FileDownload;
-import org.springframework.core.io.Resource;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
@@ -36,30 +44,40 @@ public class FileService {
     private String bucketName;
 
     private final FileMetadataRepository fileMetadataRepository;
+    private final UserRepository userRepository;
 
-    private final RedisTemplate<String, FileMetaData> redisTemplate;
+    private final RedisTemplate<String, CachedFileMetaData> redisTemplate;
 
     private final MinioClient minioClient;
 
     public FileService(
             FileMetadataRepository fileMetadataRepository,
-            RedisTemplate<String, FileMetaData> redisTemplate,
-            MinioClient minioClient
+            RedisTemplate<String, CachedFileMetaData> redisTemplate,
+            MinioClient minioClient,
+            UserRepository userRepository
     ) {
         this.fileMetadataRepository = fileMetadataRepository;
         this.redisTemplate = redisTemplate;
         this.minioClient = minioClient;
+        this.userRepository=userRepository;
+    }
+
+    private User getCurrentUser(){
+        Authentication authentication= SecurityContextHolder.getContext().getAuthentication();
+        String email=authentication.getName();
+        return userRepository.findByEmail(email)
+                .orElseThrow(()-> new UsernameNotFoundException("Username not found"));
     }
 
     private String getCacheKey(UUID id) {
         return "file:" + id;
     }
 
-    private FileMetaData getFromCache(UUID id) {
+    private CachedFileMetaData getFromCache(UUID id) {
 
         String key = getCacheKey(id);
 
-        FileMetaData data =
+        CachedFileMetaData data =
                 redisTemplate.opsForValue().get(key);
 
         if (data != null) {
@@ -78,7 +96,7 @@ public class FileService {
         return null;
     }
 
-    private void saveToCache(FileMetaData data) {
+    private void saveToCache(CachedFileMetaData data) {
 
         String key = getCacheKey(data.getId());
 
@@ -200,12 +218,14 @@ public class FileService {
 
             // Upload actual file to MinIO
             uploadObject(file, storedFileName);
+            User owner=getCurrentUser();
 
             // Save metadata to PostgreSQL
-            FileMetaData metadata = saveMetaData(
+            FileMetadata metadata = saveMetaData(
                     file,
                     originalFileName,
-                    storedFileName
+                    storedFileName,
+                    owner
             );
 
             logger.info(
@@ -242,19 +262,35 @@ public class FileService {
                 id
         );
 
-        FileMetaData metadata = getFromCache(id);
+        User user = getCurrentUser();
+        UUID userId = user.getId();
+
+        CachedFileMetaData metadata = getFromCache(id);
 
         if (metadata == null) {
 
-            metadata = fileMetadataRepository
+            FileMetadata data = fileMetadataRepository
                     .findById(id)
                     .orElseThrow(() ->
-                            new FileNotFound(
-                                    "File not found with id " + id
-                            )
-                    );
+                            new FileNotFound("File not found with id " + id));
+
+            metadata = new CachedFileMetaData(
+                    data.getId(),
+                    data.getOriginalName(),
+                    data.getStoredName(),
+                    data.getSize(),
+                    data.getContentType(),
+                    data.getCreatedAt(),
+                    data.getOwner().getId()
+            );
 
             saveToCache(metadata);
+        }
+
+        if (!userId.equals(metadata.getOwnerId())) {
+            throw new InvalidCredentialsException(
+                    "You are not allowed to download this file!"
+            );
         }
 
         try {
@@ -297,13 +333,20 @@ public class FileService {
                 id
         );
 
-        FileMetaData metadata = fileMetadataRepository
+        User user=getCurrentUser();
+        UUID userId=user.getId();
+
+        FileMetadata metadata = fileMetadataRepository
                 .findById(id)
                 .orElseThrow(() ->
                         new FileNotFound(
                                 "File not found with id " + id
                         )
                 );
+
+        if(!userId.equals(metadata.getOwner().getId())){
+            throw new InvalidCredentialsException("You are not allowed to delete!");
+        }
 
         try {
 
@@ -399,19 +442,27 @@ public class FileService {
         }
     }
 
-    private FileMetaData saveMetaData(
+    private FileMetadata saveMetaData(
             MultipartFile file,
             String originalFileName,
-            String storedFileName
+            String storedFileName,
+            User owner
     ) {
 
-        FileMetaData metadata = new FileMetaData(
+        FileMetadata metadata = new FileMetadata(
                 originalFileName,
                 storedFileName,
                 file.getSize(),
-                file.getContentType()
+                file.getContentType(),
+                owner
         );
 
         return fileMetadataRepository.save(metadata);
+    }
+
+    public List<FileMetadata> getAllFiles(Pageable request) {
+        User user=getCurrentUser();
+        UUID userId=user.getId();
+        return fileMetadataRepository.findByOwnerId(userId, request).getContent();
     }
 }

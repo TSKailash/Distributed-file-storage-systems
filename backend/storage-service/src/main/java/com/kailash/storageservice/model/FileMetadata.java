@@ -1,13 +1,15 @@
 package com.kailash.storageservice.model;
 
 import jakarta.persistence.*;
+import lombok.Data;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
 
 @Entity
 @Table(name = "file_metadata")
-public class FileMetaData {
+@Data
+public class FileMetadata {
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
     private UUID id;
@@ -27,17 +29,24 @@ public class FileMetaData {
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
-    public FileMetaData(){
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "owner_id", nullable=false)
+    private User owner;
+
+    public FileMetadata(){
 
     }
 
-    public FileMetaData(String originalName, String storedName, Long size, String contentType) {
+    public FileMetadata(String originalName, String storedName, Long size, String contentType, User owner) {
         this.originalName = originalName;
         this.storedName = storedName;
         this.size = size;
         this.contentType = contentType;
         this.createdAt=LocalDateTime.now();
+        this.owner=owner;
     }
+
+
 
     public UUID getId() {
         return id;
