@@ -50,20 +50,20 @@ public class GlobalExceptionHandler {
                 .status(HttpStatus.CONFLICT)
                 .body(error);
     }
-
-    @ExceptionHandler(InvalidCredentialsException.class)
+    @ExceptionHandler(AccessDeniedException.class)
     public ResponseEntity<ErrorResponse> handleInvalidCredentials(
-            InvalidCredentialsException ex) {
+            AccessDeniedException ex) {
 
         ErrorResponse error = new ErrorResponse(
-                HttpStatus.UNAUTHORIZED.value(),
+                HttpStatus.FORBIDDEN.value(),
                 ex.getMessage()
         );
 
         return ResponseEntity
-                .status(HttpStatus.UNAUTHORIZED)
+                .status(HttpStatus.FORBIDDEN)
                 .body(error);
     }
+
 
     @ExceptionHandler(FileValidationException.class)
     public ResponseEntity<ErrorResponse> handleValidation(

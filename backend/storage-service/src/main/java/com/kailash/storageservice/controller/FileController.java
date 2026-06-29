@@ -1,8 +1,11 @@
 package com.kailash.storageservice.controller;
 
 import com.kailash.storageservice.dto.FileDownload;
+import com.kailash.storageservice.dto.FileResponse;
 import com.kailash.storageservice.dto.FileUploadResponse;
+import com.kailash.storageservice.dto.UserDTO;
 import com.kailash.storageservice.model.FileMetadata;
+import com.kailash.storageservice.model.User;
 import com.kailash.storageservice.service.FileService;
 import org.springframework.core.io.Resource;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -35,7 +38,12 @@ public class FileController {
     public FileUploadResponse upload(@RequestParam("file") MultipartFile file) throws IOException {
         UUID id=fileService.uploadFile(file);
 
-        return new FileUploadResponse("Uploaded", id);
+        return new FileUploadResponse("File uploaded successfully", id);
+    }
+
+    @GetMapping("/me")
+    public UserDTO getUser(){
+        return fileService.getUser();
     }
 
     @GetMapping("/{id}")
@@ -59,12 +67,13 @@ public class FileController {
         return ResponseEntity.ok("Deleted successfully");
     }
 
-    @GetMapping("/files")
-    public List<FileMetadata> getAllFiles(@RequestParam (required = false, defaultValue = "0") int pageNo,
+    @GetMapping("/")
+    public List<FileResponse> getAllFiles(@RequestParam (required = false, defaultValue = "0") int pageNo,
                                           @RequestParam (required = false, defaultValue = "5") int pageSize,
                                           @RequestParam (required = false, defaultValue = "id") String sortBy,
-                                          @RequestParam (required = false) String sortDir){
+                                          @RequestParam (required = false) String sortDir,
+                                          @RequestParam (required = false) String search){
         Sort sort=sortDir!=null && sortDir.equalsIgnoreCase("desc") ? Sort.by(sortBy).descending() : Sort.by(sortBy).ascending();
-        return fileService.getAllFiles(PageRequest.of(pageNo, pageSize, sort));
+        return fileService.getAllFiles(PageRequest.of(pageNo, pageSize, sort), search);
     }
 }

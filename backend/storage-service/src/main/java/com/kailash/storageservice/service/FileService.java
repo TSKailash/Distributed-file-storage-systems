@@ -1,10 +1,9 @@
 package com.kailash.storageservice.service;
 
 import com.kailash.storageservice.dto.CachedFileMetaData;
-import com.kailash.storageservice.exception.FileNotFound;
-import com.kailash.storageservice.exception.FileValidationException;
-import com.kailash.storageservice.exception.InvalidCredentialsException;
-import com.kailash.storageservice.exception.StorageException;
+import com.kailash.storageservice.dto.FileResponse;
+import com.kailash.storageservice.dto.UserDTO;
+import com.kailash.storageservice.exception.*;
 import com.kailash.storageservice.model.FileMetadata;
 import com.kailash.storageservice.model.User;
 import com.kailash.storageservice.repository.FileMetadataRepository;
@@ -18,7 +17,6 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.InputStreamResource;
 import com.kailash.storageservice.dto.FileDownload;
-import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Pageable;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.security.core.Authentication;
@@ -31,6 +29,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
@@ -288,7 +287,7 @@ public class FileService {
         }
 
         if (!userId.equals(metadata.getOwnerId())) {
-            throw new InvalidCredentialsException(
+            throw new AccessDeniedException(
                     "You are not allowed to download this file!"
             );
         }
@@ -345,7 +344,7 @@ public class FileService {
                 );
 
         if(!userId.equals(metadata.getOwner().getId())){
-            throw new InvalidCredentialsException("You are not allowed to delete!");
+            throw new AccessDeniedException("You are not allowed to delete!");
         }
 
         try {
@@ -419,28 +418,6 @@ public class FileService {
         return UUID.randomUUID() + extension;
     }
 
-    private void storeFile(MultipartFile file, String fileName) {
-        try {
-            minioClient.putObject(
-                    PutObjectArgs.builder()
-                            .bucket(bucketName)
-                            .object(fileName)
-                            .stream(
-                                    file.getInputStream(),
-                                    file.getSize(),
-                                    -1
-                            )
-                            .contentType(file.getContentType())
-                            .build()
-            );
-        } catch (Exception e) {
-
-            throw new StorageException(
-                    "Failed to Upload to MinIO",
-                    e
-            );
-        }
-    }
 
     private FileMetadata saveMetaData(
             MultipartFile file,
@@ -460,9 +437,29 @@ public class FileService {
         return fileMetadataRepository.save(metadata);
     }
 
-    public List<FileMetadata> getAllFiles(Pageable request) {
+    public List<FileResponse> getAllFiles(Pageable request, String search) {
         User user=getCurrentUser();
         UUID userId=user.getId();
-        return fileMetadataRepository.findByOwnerId(userId, request).getContent();
+        List<FileResponse> res=new ArrayList<>();
+        if(search==null) {
+            List<FileMetadata> data = fileMetadataRepository.findByOwnerId(userId, request).getContent();
+            for (FileMetadata d : data) {
+                res.add(new FileResponse(d.getId(), d.getOriginalName(), d.getSize(), d.getContentType(), d.getCreatedAt()));
+            }
+            return res;
+        }
+        System.out.println("Owner ID : " + userId);
+        System.out.println("Search   : " + search);
+        List<FileMetadata> data= fileMetadataRepository.findByOwnerIdAndOriginalNameContaining(userId, request, search).getContent();
+        for (FileMetadata d : data) {
+            res.add(new FileResponse(d.getId(), d.getOriginalName(), d.getSize(), d.getContentType(), d.getCreatedAt()));
+        }
+        System.out.println("Results : " + data.size());
+        return res;
+    }
+
+    public UserDTO getUser() {
+        User user=getCurrentUser();
+        return new UserDTO(user.getId(), user.getName(), user.getEmail(), user.getRole());
     }
 }
